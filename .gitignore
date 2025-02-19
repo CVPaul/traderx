@@ -1,0 +1,11 @@
+*.ipynb
+*.so
+*.txt
+*.deb
+*.json
+*.csv
+*.pdf
+.ipynb_checkpoints
+.egg-info
+*.egg-info
+*.pyc
