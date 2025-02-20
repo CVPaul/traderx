@@ -8,4 +8,6 @@
 .ipynb_checkpoints
 .egg-info
 *.egg-info
+*.npy
+*.log
 *.pyc
