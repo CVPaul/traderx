@@ -1,0 +1,11 @@
+args:
+  open_threshold: 1.5
+  force_open_threshold: 2.0
+  close_threshold: -1.0
+  force_close_threshold: -1.5
+  rolling_cache_len: 120
+  max_volume_per_tick: 0.010
+  max_volume_per_size: 0.010
+  max_volume_legdiff: 0.010
+  order_timeout_ms: 5000
+  action_timeout_ms: 1000

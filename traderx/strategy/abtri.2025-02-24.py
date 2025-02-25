@@ -8,6 +8,7 @@ import numpy as np
 
 from zero.trans.strategy.strategy import Strategy
 
+
 # 这一版没问题了，发布上线
 class Abtri(Strategy):
 
@@ -38,7 +39,6 @@ class Abtri(Strategy):
         self.rolling_window_idx = 0
         self.current_timestamp = 0
         self.last_action_timestamp = 0
-        self.current_basisbp = None
 
         # trading parameters
         self.max_volume_per_tick = max_volume_per_tick
@@ -49,8 +49,6 @@ class Abtri(Strategy):
         self.action_timeout_ms = action_timeout_ms
 
         self.consider_maker = [True, False]
-        self.fake_position = torch.zeros([self.position_size, 2])
-        self.fake_trade = [False, True]
 
     # 以当前盘口本方一档为基准，向对方移动多少价格，正代表靠近对方，负代表远离对方，如果price是None，下taker
     def _long_open_maker(self, instrument_id, mds, volume, price=0):
@@ -104,13 +102,15 @@ class Abtri(Strategy):
 
     # alpha部分，计算基差，给出套利决策
     def eval_basis(self):
-        basisbp = self.current_basisbp
+        basisbp = self.rolling_window_basis_sec[self.rolling_window_idx-1]
         rolling_mean_basisbp = self.rolling_window_basis_sec.mean(dim=0)
 
         force_long_open = basisbp[2] > rolling_mean_basisbp[2] + self.force_open_threshold
         force_long_close = basisbp[1] < rolling_mean_basisbp[1] + self.force_close_threshold
         force_short_open = basisbp[1] <  rolling_mean_basisbp[1] - self.force_open_threshold
         force_short_close = basisbp[2] > rolling_mean_basisbp[2] - self.force_close_threshold
+        logging.info(f'inspect-3:{basisbp=}')
+        logging.info(f'inspect-4:{rolling_mean_basisbp=}')
 
         if self.consider_maker[0] and self.consider_maker[1]:
             try_long_open_idx = 1
@@ -321,55 +321,33 @@ class Abtri(Strategy):
         order = torch.tensor(order).transpose(1, 0)
         return order
 
-    def filter_fake_trade(self, orders):
-        fake_orders = \
-            (self.fake_trade[0] & (orders[self.instrument_id] == 0)) | \
-            (self.fake_trade[1] & (orders[self.instrument_id] == 1))
-        assert (orders[self.action, fake_orders] == 0).all()
-        if fake_orders.sum() == 0:
-            return orders
-        valid_orders = orders[:, ~fake_orders]
-        fake_orders = orders[:, fake_orders]
-
-        long_buy_orders = (fake_orders[self.side] == 0) & (fake_orders[self.direction] == 0)
-        long_sell_orders = (fake_orders[self.side] == 0) & (fake_orders[self.direction] == 1)
-        short_sell_orders = (fake_orders[self.side] == 1) & (fake_orders[self.direction] == 1)
-        short_buy_orders = (fake_orders[self.side] == 1) & (fake_orders[self.direction] == 0)
-
-        for inst_id in range(self.fake_position.shape[1]):
-            self.fake_position[self.long_buy, inst_id] += fake_orders[self.total_volume, long_buy_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
-            self.fake_position[self.long_sell, inst_id] += fake_orders[self.total_volume, long_sell_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
-            self.fake_position[self.short_sell, inst_id] += fake_orders[self.total_volume, short_sell_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
-            self.fake_position[self.short_buy, inst_id] += fake_orders[self.total_volume, short_buy_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
-        return valid_orders
-
     def forward(self, timestamp, mds, positions, ask_orders, bid_orders):
         if (mds[self.askprice] == 0).any() or (mds[self.bidprice] == 0).any():
             return torch.zeros(self.order_size, 0)
 
-        price_1 = mds[[self.askprice, self.bidprice], 1]
-        price_0 = mds[[self.askprice, self.bidprice], 0]
-        basis = price_1.unsqueeze(dim=1) - price_0.unsqueeze(dim=0)
-        avgprice = (price_1.unsqueeze(dim=1) + price_0.unsqueeze(dim=0)) / 2
-        basisbp = ((basis / avgprice) * 1e4).reshape(-1) # a1-a0, a1-b0, b1-a0, b1-b0
-        logging.info(f'{basisbp}')
         if self.current_timestamp // 1e3 != timestamp // 1e3:
+            price_1 = mds[[self.askprice, self.bidprice], 1]
+            price_0 = mds[[self.askprice, self.bidprice], 0]
+            basis = price_1.unsqueeze(dim=1) - price_0.unsqueeze(dim=0)
+            avgprice = (price_1.unsqueeze(dim=1) + price_0.unsqueeze(dim=0)) / 2
+            basisbp = ((basis / avgprice) * 1e4).reshape(-1) # a1-a0, a1-b0, b1-a0, b1-b0
+            logging.info(f'inspect-1:{self.current_timestamp=}')
+            logging.info(f'inspect-2:{basisbp=}')
+
             self.rolling_window_basis_sec[self.rolling_window_idx] = basisbp
             self.rolling_window_idx += 1
             if self.rolling_window_idx == len(self.rolling_window_basis_sec):
                 self.rolling_window_is_full = True
                 self.rolling_window_idx = 0
         self.current_timestamp = timestamp
-        self.current_basisbp = basisbp
         if not self.rolling_window_is_full:
             return torch.zeros(self.order_size, 0)
 
-        positions = positions + self.fake_position
         pos_long = positions[self.long_init_pos] + positions[self.long_buy] - positions[self.long_sell]
         pos_short = positions[self.short_init_pos] + positions[self.short_sell] - positions[self.short_buy]
 
-        short_open_orders = ask_orders[:, ask_orders[self.side] == 1] # 开空
-        long_open_orders = bid_orders[:, bid_orders[self.side] == 0] # 开多
+        short_open_orders = ask_orders[:, ask_orders[self.side] > 0.5] # 开空
+        long_open_orders = bid_orders[:, bid_orders[self.side] < 0.5] # 开多
 
         if pos_long[0] != 0 or (long_open_orders[self.instrument_id] == 0).sum() != 0 or \
             pos_short[1] != 0 or (short_open_orders[self.instrument_id] == 1).sum() != 0:
@@ -384,6 +362,4 @@ class Abtri(Strategy):
             orders = self.status_empty(mds)
         if orders.shape[1] != 0:
             orders = self._filter_invalid_orders(positions, orders)
-        if orders.shape[1] != 0:
-            orders = self.filter_fake_trade(orders)
         return orders

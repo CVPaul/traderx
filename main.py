@@ -5,6 +5,7 @@
 import os
 import sys
 import time
+import yaml
 import json
 import torch
 import logging
@@ -44,24 +45,18 @@ class TraderManager:
         self.platform = Platform()
         self.platform.reset(self.symbols)
         # init the strategy
-        self.strategy = Abtri(
-            open_threshold=1.0, #5.0,
-            force_open_threshold=2.0, # 9.0,
-            close_threshold=0.5, # 4.0,
-            force_close_threshold= 1.0, # 7.0,
-            rolling_cache_len=120,
-            # trading parameters
-            max_volume_per_tick=0.008,
-            max_volume_per_size=0.008,
-            max_volume_legdiff=0.008,
-            order_timeout_ms=5000,
-            action_timeout_ms=1000
-        )
+        with open('abtri.config.yaml') as fp:
+            config = yaml.safe_load(fp)
+        print(config)
+        self.strategy = Abtri(**config['args'])
         # risk control
         self.add_action_count = 0
-        self.add_action_limit = 10
+        self.add_action_limit = -1
         self.cancel_action_count = 0
-        self.cancel_action_limit = 20
+        self.cancel_action_limit = -1
+        # add and cancel cache
+        self.add_cache = {}
+        self.cancel_cache = {}
 
     def on_open(self, _):
         self.connected = True
@@ -88,7 +83,7 @@ class TraderManager:
                 self.platform.g_order_id = int(fp.read().strip())
         # orders
         for symbol in self.symbols:
-            orders = self.cli.get_open_orders(symbol)
+            orders = self.cli.get_orders(symbol=symbol)
             for order in orders:
                 user_oid = order['clientOrderId']
                 if not self.is_this_strategy(user_oid):
@@ -106,12 +101,12 @@ class TraderManager:
     def on_message(self, _, message):
         try:
             doc = json.loads(message)
-            if 'E' in doc:
-                if doc['E'] - self.last_check_time > 60000: # 1min
-                    logging.info(f'HeartBeat!')
-                    self.last_check_time = doc['E']
             etype = doc.get('e', '')
             if etype == 'bookTicker':
+                T = doc['E']
+                if T - self.last_check_time > 60000: # 1min
+                    logging.info(f'HeartBeat|{self.add_cache=},{self.cancel_cache=}')
+                    self.last_check_time = T
                 if doc['s'] not in self.symbols:
                     return # this message not belongs to this strategy
                 self.platform.step(doc)
@@ -123,13 +118,17 @@ class TraderManager:
                     torch.from_numpy(self.platform.bid_orders).transpose(0, 1)
                 ).transpose(0, 1).numpy()
                 for action in actions:
+                    logging.info(f'ACTION|{action}')
                     if action[self.strategy.action] == 0: # add
-                        order_id = self.platform.add(action)
+                        order_id = self.platform.g_order_id + 1
                         order = self.platform.action2order(action)
                         order['newClientOrderId'] = self.new_user_order_id(order_id)
+                        self.save_order_id()
                         self.add_action_count += 1
-                        if self.add_action_count <= self.add_action_limit:
+                        if self.add_action_limit < 0 or self.add_action_count <= self.add_action_limit:
                             self.cli.new_order(**order)
+                            self.add_cache[order['newClientOrderId']] = T
+                            assert order_id == self.platform.add(action)
                             logging.info(f'ORDER|{order}')
                         else:
                             logging.warning(f"{self.add_action_count=} > {self.add_action_limit=}")
@@ -138,28 +137,45 @@ class TraderManager:
                         order_id = int(action[self.strategy.order_id] + 0.5)
                         symbol = self.symbols[ii]
                         self.cancel_action_count += 1
-                        if self.cancel_action_count <= self.cancel_action_limit:
-                            self.cli.cancel_order(
-                                symbol=symbol,
-                                origClientOrderId=self.new_user_order_id(order_id))
+                        if self.cancel_action_limit < 0 or self.cancel_action_count <= self.cancel_action_limit:
+                            u_oid = self.new_user_order_id(order_id)
+                            if u_oid in self.cancel_cache:
+                                logging.error(f'DUPLICATE-CANCEL|{symbol=},{u_oid=}')
+                                self.platform.cancel(order_id)
+                            try:
+                                self.cli.cancel_order(
+                                    symbol=symbol, origClientOrderId=u_oid)
+                            except binance.error.ClientError as e:
+                                print(e.error_code)
+                                if e.error_code == -2011: # Unknown order send
+                                    pass
+                                else:
+                                    raise e
+                            self.cancel_cache[u_oid] = T
+                            self.platform.cancel(order_id)
+                            self.save_positions()
+                            logging.info(f'CANCEL|{symbol=},{u_oid}')
                         else:
                             logging.warning(f"{self.cancel_action_count=} > {self.cancel_action_limit=}")
-                        logging.info(f'CANCEL|{symbol=},{action=}')
                 if actions.shape[0]:
                     self.save_positions()
             elif etype == 'ORDER_TRADE_UPDATE':
-                if not self.is_this_strategy(doc['o']['c']):
+                order = doc['o']
+                if not self.is_this_strategy(order['c']):
                     return # message not belongs to this strategy
-                if doc['x'] == 'NEW':
-                    pass
-                elif doc['x'] == 'PARTIALLY_FILLED' or doc['x'] == 'FILLED':
-                    self.platform.match(doc)
+                status = order['x']
+                if status == 'NEW':
+                    self.add_cache.pop(order['c'])
+                    logging.info(f'REAL-ORDER|{order=}')
+                elif status == 'TRADE':
+                    self.platform.match(order)
                     self.save_positions()
-                elif doc['x'] == 'CANCELED' or doc['x'] == 'EXPIRED':
-                    self.platform.cancel(int(doc['o']['c'][self.namelen + 1:]))
-                    self.save_positions()
+                    logging.info(f'REAL-TRADE|{order=}')
+                elif status == 'CANCELED' or status == 'EXPIRED':
+                    self.cancel_cache.pop(order['c'])
+                    logging.info(f'REAL-CANCELED|{order=}')
                 else:
-                    logging.warning(f"MSSAGE|{doc}")
+                    logging.warning(f"MESSAGE|{doc}")
         except Exception as e:
             logging.exception(f"processing message failed with error:{e}!")
 

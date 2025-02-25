@@ -138,8 +138,7 @@ class Platform(StructBase):
                 self.positions[ii][self.short_unfilled_sell] -= volume
             self.ask_orders_[ii].remove(oi)
 
-    def match(self, tick):
-        order = tick['o']
+    def match(self, order):
         ii = self.ticker2ii[order['s']]
         user_oid = order['c']
         order_id = int(user_oid.split('_')[-1])
@@ -153,21 +152,25 @@ class Platform(StructBase):
             return
         # buy side
         if order['S'] == 'BUY': 
-            if order[self.side] == 0: # long-buy --> long-open
+            if order['ps'] == 'LONG': # long-buy --> long-open
                 self.positions[ii, self.long_unfilled_buy] -= volume
                 self.positions[ii, self.long_buy] += volume
-            else: # short-buy --> short-close
+            elif order['ps'] == 'SHORT': # short-buy --> short-close
                 self.positions[ii, self.short_unfilled_buy] -= volume
                 self.positions[ii, self.short_buy] += volume
+            else:
+                logging.error(f'Invalid position side:BUY-{order["ps"]}!')
             if order['X'] == 'FILLED':
                 self.bid_orders_[ii].remove(order_id)
         # sell side
         if order['S'] == 'SELL': 
-            if order[self.side] == 0: # long-sell --> long-close
+            if order['ps'] == 'LONG': # long-sell --> long-close
                 self.positions[ii, self.long_unfilled_sell] -= volume
                 self.positions[ii, self.long_sell] += volume
-            else: # short-sell --> short-open
+            elif order['ps'] == 'SHORT': # short-sell --> short-open
                 self.positions[ii, self.short_unfilled_sell] -= volume
                 self.positions[ii, self.short_sell] += volume
+            else:
+                logging.error(f'Invalid position side:SELL-{order["ps"]}!')
             if order['X'] == 'FILLED':
                 self.ask_orders_[ii].remove(order_id)
