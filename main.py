@@ -8,6 +8,7 @@ import time
 import yaml
 import json
 import torch
+import binance
 import logging
 import argparse
 import numpy as np
@@ -82,7 +83,7 @@ class TraderManager:
             with open(self.order_id_path) as fp:
                 self.platform.g_order_id = int(fp.read().strip())
         # orders
-        for symbol in self.symbols:
+        for ii, symbol in enumerate(self.symbols):
             orders = self.cli.get_orders(symbol=symbol)
             for order in orders:
                 user_oid = order['clientOrderId']
@@ -92,6 +93,7 @@ class TraderManager:
                 self.platform.recover(ii, order_id, order) # recover one order
 
     def save_positions(self):
+        self.platform.positions = self.platform.positions.round(6)
         np.save(self.position_path, self.platform.positions)
 
     def save_order_id(self):
@@ -110,15 +112,22 @@ class TraderManager:
                 if doc['s'] not in self.symbols:
                     return # this message not belongs to this strategy
                 self.platform.step(doc)
+                if self.platform.ask_orders.shape[0]:
+                    logging.info(f'mds={self.platform.mds}')
+                    logging.info(f'mds={self.platform.positions}')
+                    logging.info(f'mds={self.platform.ask_orders}')
+                if self.platform.bid_orders.shape[0]:
+                    logging.info(f'mds={self.platform.mds}')
+                    logging.info(f'mds={self.platform.positions}')
+                    logging.info(f'mds={self.platform.bid_orders}')
                 actions = self.strategy.forward(
                     self.platform.timestamp,
                     torch.from_numpy(self.platform.mds).transpose(0, 1),
                     torch.from_numpy(self.platform.positions).transpose(0, 1),
-                    torch.from_numpy(self.platform.ask_orders).transpose(0, 1),
-                    torch.from_numpy(self.platform.bid_orders).transpose(0, 1)
+                    torch.from_numpy(self.platform.ask_orders.round(6)).transpose(0, 1),
+                    torch.from_numpy(self.platform.bid_orders.round(6)).transpose(0, 1)
                 ).transpose(0, 1).numpy()
                 for action in actions:
-                    logging.info(f'ACTION|{action}')
                     if action[self.strategy.action] == 0: # add
                         order_id = self.platform.g_order_id + 1
                         order = self.platform.action2order(action)
@@ -126,9 +135,11 @@ class TraderManager:
                         self.save_order_id()
                         self.add_action_count += 1
                         if self.add_action_limit < 0 or self.add_action_count <= self.add_action_limit:
+                            logging.info(f'TRY-ORDER|{order}')
                             self.cli.new_order(**order)
                             self.add_cache[order['newClientOrderId']] = T
                             assert order_id == self.platform.add(action)
+                            logging.info(f'ACTION|{action}')
                             logging.info(f'ORDER|{order}')
                         else:
                             logging.warning(f"{self.add_action_count=} > {self.add_action_limit=}")
@@ -139,9 +150,6 @@ class TraderManager:
                         self.cancel_action_count += 1
                         if self.cancel_action_limit < 0 or self.cancel_action_count <= self.cancel_action_limit:
                             u_oid = self.new_user_order_id(order_id)
-                            if u_oid in self.cancel_cache:
-                                logging.error(f'DUPLICATE-CANCEL|{symbol=},{u_oid=}')
-                                self.platform.cancel(order_id)
                             try:
                                 self.cli.cancel_order(
                                     symbol=symbol, origClientOrderId=u_oid)
@@ -153,7 +161,6 @@ class TraderManager:
                                     raise e
                             self.cancel_cache[u_oid] = T
                             self.platform.cancel(order_id)
-                            self.save_positions()
                             logging.info(f'CANCEL|{symbol=},{u_oid}')
                         else:
                             logging.warning(f"{self.cancel_action_count=} > {self.cancel_action_limit=}")
@@ -167,7 +174,7 @@ class TraderManager:
                 if status == 'NEW':
                     self.add_cache.pop(order['c'])
                     logging.info(f'REAL-ORDER|{order=}')
-                elif status == 'TRADE':
+                elif status == 'TRADE' or order['X'] == 'FILLED':
                     self.platform.match(order)
                     self.save_positions()
                     logging.info(f'REAL-TRADE|{order=}')

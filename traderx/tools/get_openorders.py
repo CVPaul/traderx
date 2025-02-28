@@ -15,4 +15,5 @@ if __name__ == "__main__":
     rsp = cli.get_all_orders(sys.argv[1], limit=int(sys.argv[2]))
     df = pd.DataFrame(rsp)
     df['updateTime'] = pd.to_datetime(df.updateTime * 1e6)
+    df.to_csv("trades.csv")
     print(df)

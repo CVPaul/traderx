@@ -49,7 +49,7 @@ class Abtri(Strategy):
         self.action_timeout_ms = action_timeout_ms
 
         self.consider_maker = [True, False]
-        self.fake_position = torch.zeros([self.position_size, 2], dtype=torch.float32)
+        self.fake_position = torch.zeros([self.position_size, 2])
         self.fake_trade = [False, True]
 
     # 以当前盘口本方一档为基准，向对方移动多少价格，正代表靠近对方，负代表远离对方，如果price是None，下taker
@@ -201,10 +201,10 @@ class Abtri(Strategy):
         unfilled_long_open = bid_orders[:, probable_long_open_mask]
         unfilled_short_close = bid_orders[:, probable_short_close_mask]
 
-        unfilled_long_open = (unfilled_long_open[self.total_volume] - unfilled_long_open[self.trade_volume]).sum().round(decimals=6)
-        unfilled_long_close = (unfilled_long_close[self.total_volume] - unfilled_long_close[self.trade_volume]).sum().round(decimals=6)
-        unfilled_short_open = (unfilled_short_open[self.total_volume] - unfilled_short_open[self.trade_volume]).sum().round(decimals=6)
-        unfilled_short_close = (unfilled_short_close[self.total_volume] - unfilled_short_close[self.trade_volume]).sum().round(decimals=6)
+        unfilled_long_open = (unfilled_long_open[self.total_volume] - unfilled_long_open[self.trade_volume]).sum()
+        unfilled_long_close = (unfilled_long_close[self.total_volume] - unfilled_long_close[self.trade_volume]).sum()
+        unfilled_short_open = (unfilled_short_open[self.total_volume] - unfilled_short_open[self.trade_volume]).sum()
+        unfilled_short_close = (unfilled_short_close[self.total_volume] - unfilled_short_close[self.trade_volume]).sum()
 
         return (
             probable_long_open_mask, probable_long_close_mask,
@@ -214,8 +214,8 @@ class Abtri(Strategy):
         )
 
     def status_trading(self, mds, positions, ask_orders, bid_orders):
-        pos_long = (positions[self.long_init_pos] + positions[self.long_buy] - positions[self.long_sell]).round(decimals=6)
-        pos_short = (positions[self.short_init_pos] + positions[self.short_sell] - positions[self.short_buy]).round(decimals=6)
+        pos_long = positions[self.long_init_pos] + positions[self.long_buy] - positions[self.long_sell]
+        pos_short = positions[self.short_init_pos] + positions[self.short_sell] - positions[self.short_buy]
         probable_long_open_mask, probable_long_close_mask, probable_short_open_mask, probable_short_close_mask, \
             unfilled_long_open, unfilled_long_close, unfilled_short_open, unfilled_short_close = self._get_probable_fill_volume(ask_orders, bid_orders)
 
@@ -248,16 +248,13 @@ class Abtri(Strategy):
         unfilled_short_open_orders = ask_orders[:, probable_short_open_mask & (ask_orders[self.instrument_id] == short_id)]
         unfilled_long_close_orders = ask_orders[:, probable_long_close_mask & (ask_orders[self.instrument_id] == long_id)]
         unfilled_short_close_orders = bid_orders[:, probable_short_close_mask & (bid_orders[self.instrument_id] == short_id)]
-        unfilled_pos_long_open = (unfilled_long_open_orders[self.total_volume] - unfilled_long_open_orders[self.trade_volume]).sum().round(decimals=6)
-        unfilled_pos_short_open = (unfilled_short_open_orders[self.total_volume] - unfilled_short_open_orders[self.trade_volume]).sum().round(decimals=6)
-        unfilled_pos_long_close = (unfilled_long_close_orders[self.total_volume] - unfilled_long_close_orders[self.trade_volume]).sum().round(decimals=6)
-        unfilled_pos_short_close = (unfilled_short_close_orders[self.total_volume] - unfilled_short_close_orders[self.trade_volume]).sum().round(decimals=6)
+        unfilled_pos_long_open = (unfilled_long_open_orders[self.total_volume] - unfilled_long_open_orders[self.trade_volume]).sum()
+        unfilled_pos_short_open = (unfilled_short_open_orders[self.total_volume] - unfilled_short_open_orders[self.trade_volume]).sum()
+        unfilled_pos_long_close = (unfilled_long_close_orders[self.total_volume] - unfilled_long_close_orders[self.trade_volume]).sum()
+        unfilled_pos_short_close = (unfilled_short_close_orders[self.total_volume] - unfilled_short_close_orders[self.trade_volume]).sum()
 
         # 检查是否仓位balance，并taker平掉单腿
         balance = (_pos_long + unfilled_pos_long_open - unfilled_pos_long_close) - (_pos_short + unfilled_pos_short_open - unfilled_pos_short_close)
-        if balance!= 0 and abs(balance) < 1e-5:
-            import pdb
-            pdb.set_trace()
         if balance != 0:
             if balance > 0:
                 order = [self._long_close_maker(long_id, mds, volume=balance, price=None)]
@@ -287,7 +284,7 @@ class Abtri(Strategy):
             assert _pos_long + unfilled_pos_long == _pos_short + unfilled_pos_short
             target_pos = min(_pos_long + unfilled_pos_long + self.max_volume_per_tick, self.max_volume_per_side) # 仓位上限
             target_pos = min(target_pos, min(_pos_long, _pos_short) + self.max_volume_legdiff) # 单腿上限，风控限制
-            extra_pos = (target_pos - (_pos_long + unfilled_pos_long)).round(decimals=6)
+            extra_pos = target_pos - (_pos_long + unfilled_pos_long)
             if extra_pos > 0:
                 order = [
                     self._long_open_maker(long_id, mds, volume=extra_pos, price=None if force_open else 0),
@@ -310,7 +307,7 @@ class Abtri(Strategy):
             assert _pos_long - unfilled_pos_long == _pos_short - unfilled_pos_short
             target_pos = max(0, _pos_long - unfilled_pos_long - self.max_volume_per_tick)
             target_pos = max(target_pos, max(_pos_long, _pos_short) - self.max_volume_legdiff)
-            extra_pos = (_pos_long - unfilled_pos_long - target_pos).round(decimals=6)
+            extra_pos = _pos_long - unfilled_pos_long - target_pos
             if extra_pos > 0:
                 order = [
                     self._long_close_maker(long_id, mds, volume=extra_pos, price=None if force_close else 0),
@@ -344,7 +341,6 @@ class Abtri(Strategy):
             self.fake_position[self.long_sell, inst_id] += fake_orders[self.total_volume, long_sell_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
             self.fake_position[self.short_sell, inst_id] += fake_orders[self.total_volume, short_sell_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
             self.fake_position[self.short_buy, inst_id] += fake_orders[self.total_volume, short_buy_orders & (fake_orders[self.instrument_id]==inst_id)].sum()
-        self.fake_position = self.fake_position.round(decimals=6)
         return valid_orders
 
     def forward(self, timestamp, mds, positions, ask_orders, bid_orders):
@@ -368,7 +364,7 @@ class Abtri(Strategy):
         if not self.rolling_window_is_full:
             return torch.zeros(self.order_size, 0)
 
-        positions = (positions + self.fake_position).round(decimals=6)
+        positions = positions + self.fake_position
         pos_long = positions[self.long_init_pos] + positions[self.long_buy] - positions[self.long_sell]
         pos_short = positions[self.short_init_pos] + positions[self.short_sell] - positions[self.short_buy]
 
@@ -390,11 +386,4 @@ class Abtri(Strategy):
             orders = self._filter_invalid_orders(positions, orders)
         if orders.shape[1] != 0:
             orders = self.filter_fake_trade(orders)
-
-        if orders.shape[1] != 0:
-            trade_orders = orders[:, orders[self.action]==0]
-            tiny_orders = orders[:, (orders[self.total_volume]!=0) & (abs(orders[self.total_volume])<1e-5)]
-            if tiny_orders.shape[1] != 0:
-                import pdb
-                pdb.set_trace()
         return orders

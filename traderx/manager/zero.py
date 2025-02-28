@@ -3,6 +3,7 @@
 
 
 import os
+import logging
 import numpy as np
 
 from typing import List
@@ -15,6 +16,10 @@ ADDED = 1
 PARTFILL = 2
 ALLFILLED = 3
 CANCELLED = 4
+
+PRECISION_MAP = {
+    'ETHUSDT': 2
+}
 
 
 class Platform(StructBase):
@@ -53,6 +58,10 @@ class Platform(StructBase):
         md[self.bidvolume] = message['B']
         md[self.askvolume] = message['A']
 
+    def get_precision(self, symbol):
+        sym = symbol.split('_')[0]
+        return PRECISION_MAP[sym]
+
     @property
     def bid_orders(self):
         count = 0
@@ -73,12 +82,14 @@ class Platform(StructBase):
 
     def action2order(self, action):
         ii = int(action[self.instrument_id] + 0.5)
+        symbol = self.tickers[ii]
+        # round_at = self.get_precision(symbol)
         return dict(
             type = 'LIMIT',
             timeInForce = 'GTC',
             symbol = self.tickers[ii],
             price = action[self.price],
-            quantity = action[self.total_volume],
+            quantity = round(action[self.total_volume], 6),
             side = 'SELL' if action[self.direction] > 0.5 else 'BUY',
             positionSide = 'SHORT' if action[self.side] > 0.5 else 'LONG'
         )
@@ -145,8 +156,14 @@ class Platform(StructBase):
         # total_volume = float(order['q'])
         # trade_volume = float(order['z'])
         volume = float(order['l'])
+        is_filled = False
         if order_id in self.orderbook:
-            self.orderbook[order_id][self.trade_volume] = float(order['z'])
+            filled_volume = float(order['z'])
+            total_volume = self.orderbook[order_id][self.total_volume]
+            if abs(total_volume - filled_volume) < 1e-6:
+                is_filled = True
+                volume = total_volume - self.orderbook[order_id][self.trade_volume]
+            self.orderbook[order_id][self.trade_volume] = total_volume
         else:
             logging.error(f'recived an unknown TRADE message:{tick}')
             return
@@ -160,8 +177,9 @@ class Platform(StructBase):
                 self.positions[ii, self.short_buy] += volume
             else:
                 logging.error(f'Invalid position side:BUY-{order["ps"]}!')
-            if order['X'] == 'FILLED':
+            if is_filled or order['X'] == 'FILLED':
                 self.bid_orders_[ii].remove(order_id)
+                logging.info(f'REAL-FILLED-REMOVE-BUY|{volume=},{order}')
         # sell side
         if order['S'] == 'SELL': 
             if order['ps'] == 'LONG': # long-sell --> long-close
@@ -172,5 +190,7 @@ class Platform(StructBase):
                 self.positions[ii, self.short_sell] += volume
             else:
                 logging.error(f'Invalid position side:SELL-{order["ps"]}!')
-            if order['X'] == 'FILLED':
+            if is_filled or order['X'] == 'FILLED':
                 self.ask_orders_[ii].remove(order_id)
+                logging.info(f'REAL-FILLED-REMOVE_SELL|{volume=},{order}')
+

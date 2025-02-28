@@ -49,7 +49,7 @@ class Abtri(Strategy):
         self.action_timeout_ms = action_timeout_ms
 
         self.consider_maker = [True, False]
-        self.fake_position = torch.zeros([self.position_size, 2], dtype=torch.float32)
+        self.fake_position = torch.zeros([self.position_size, 2])
         self.fake_trade = [False, True]
 
     # 以当前盘口本方一档为基准，向对方移动多少价格，正代表靠近对方，负代表远离对方，如果price是None，下taker
